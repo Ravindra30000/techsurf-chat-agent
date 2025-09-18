@@ -1,0 +1,511 @@
+name: 🚀 CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '18'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ================================
+  # SETUP & VALIDATION
+  # ================================
+  setup:
+    name: 📋 Setup & Validation
+    runs-on: ubuntu-latest
+    outputs:
+      client-changed: ${{ steps.changes.outputs.client }}
+      server-changed: ${{ steps.changes.outputs.server }}
+      sdk-changed: ${{ steps.changes.outputs.sdk }}
+      version: ${{ steps.version.outputs.version }}
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: 🔍 Detect changes
+        uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            client:
+              - 'client/**'
+              - 'package.json'
+            server:
+              - 'server/**'
+              - 'package.json'
+            sdk:
+              - 'sdk/**'
+              - 'package.json'
+
+      - name: 📊 Get version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+      - name: 🏷️ Create build info
+        run: |
+          echo "Build Information:" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Client changed: ${{ steps.changes.outputs.client }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Server changed: ${{ steps.changes.outputs.server }}" >> $GITHUB_STEP_SUMMARY
+          echo "- SDK changed: ${{ steps.changes.outputs.sdk }}" >> $GITHUB_STEP_SUMMARY
+
+  # ================================
+  # QUALITY CHECKS
+  # ================================
+  quality:
+    name: 🔍 Quality Checks
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Run ESLint
+        run: npm run lint
+
+      - name: 🏷️ TypeScript type check
+        run: npm run type-check
+
+      - name: 📊 Upload lint results
+        uses: github/super-linter@v4
+        if: always()
+        env:
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_TYPESCRIPT_ES: true
+          VALIDATE_JAVASCRIPT_ES: true
+
+  # ================================
+  # TESTING
+  # ================================
+  test-client:
+    name: 🧪 Test Client
+    runs-on: ubuntu-latest
+    needs: [setup, quality]
+    if: needs.setup.outputs.client-changed == 'true'
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧪 Run client tests
+        run: |
+          cd client
+          npm test -- --coverage --watchAll=false
+
+      - name: 📊 Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./client/coverage/lcov.info
+          flags: client
+          name: client-coverage
+
+  test-server:
+    name: 🧪 Test Server
+    runs-on: ubuntu-latest
+    needs: [setup, quality]
+    if: needs.setup.outputs.server-changed == 'true'
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: techsurf_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧪 Run server tests
+        run: |
+          cd server
+          npm test -- --coverage
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/techsurf_test
+          REDIS_URL: redis://localhost:6379
+          GROQ_API_KEY: test_key
+
+      - name: 📊 Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./server/coverage/lcov.info
+          flags: server
+          name: server-coverage
+
+  test-sdk:
+    name: 🧪 Test SDK
+    runs-on: ubuntu-latest
+    needs: [setup, quality]
+    if: needs.setup.outputs.sdk-changed == 'true'
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧪 Run SDK tests
+        run: |
+          cd sdk
+          npm test -- --coverage
+
+      - name: 📊 Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./sdk/coverage/lcov.info
+          flags: sdk
+          name: sdk-coverage
+
+  # ================================
+  # SECURITY SCANNING
+  # ================================
+  security:
+    name: 🔐 Security Scan
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Run npm audit
+        run: npm audit --audit-level moderate
+
+      - name: 🔐 CodeQL Analysis
+        uses: github/codeql-action/init@v2
+        with:
+          languages: javascript
+
+      - name: 🏗️ Autobuild
+        uses: github/codeql-action/autobuild@v2
+
+      - name: 🔍 Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+
+  # ================================
+  # BUILD
+  # ================================
+  build:
+    name: 🏗️ Build Applications
+    runs-on: ubuntu-latest
+    needs: [setup, quality]
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🏗️ Build all applications
+        run: npm run build:production
+
+      - name: 📦 Create build artifacts
+        run: |
+          tar -czf build-artifacts.tar.gz dist/
+          echo "Build completed at $(date)" > build-info.txt
+          echo "Commit: ${{ github.sha }}" >> build-info.txt
+          echo "Version: ${{ needs.setup.outputs.version }}" >> build-info.txt
+
+      - name: 📤 Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts-${{ github.sha }}
+          path: |
+            build-artifacts.tar.gz
+            build-info.txt
+          retention-days: 30
+
+  # ================================
+  # E2E TESTING
+  # ================================
+  e2e-test:
+    name: 🎭 E2E Tests
+    runs-on: ubuntu-latest
+    needs: [build, test-client, test-server]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 📥 Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: build-artifacts-${{ github.sha }}
+
+      - name: 📦 Extract build artifacts
+        run: tar -xzf build-artifacts.tar.gz
+
+      - name: 🎭 Install Playwright
+        run: npx playwright install --with-deps
+
+      - name: 🚀 Start application
+        run: |
+          npm start &
+          sleep 30  # Wait for app to start
+        env:
+          NODE_ENV: test
+          PORT: 3000
+
+      - name: 🎭 Run Playwright tests
+        run: npx playwright test
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
+
+      - name: 📊 Upload Playwright report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: playwright-report/
+          retention-days: 7
+
+  # ================================
+  # DEPLOYMENT
+  # ================================
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.techsurf-chat.launch.contentstack.com
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 📥 Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: build-artifacts-${{ github.sha }}
+
+      - name: 🚀 Deploy to Contentstack Launch (Staging)
+        run: |
+          curl -X POST "${{ secrets.LAUNCH_STAGING_DEPLOY_HOOK }}" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.LAUNCH_API_TOKEN }}" \
+            -d '{
+              "ref": "${{ github.sha }}",
+              "environment": "staging",
+              "branch": "${{ github.ref_name }}",
+              "version": "${{ needs.setup.outputs.version }}"
+            }'
+
+      - name: 📊 Update deployment status
+        run: |
+          echo "Staging deployment completed!" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 URL: https://staging.techsurf-chat.launch.contentstack.com" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Version: ${{ needs.setup.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+
+  deploy-production:
+    name: 🚀 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, security, e2e-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://techsurf-chat.launch.contentstack.com
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 📥 Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: build-artifacts-${{ github.sha }}
+
+      - name: 🚀 Deploy to Contentstack Launch (Production)
+        run: |
+          curl -X POST "${{ secrets.LAUNCH_PRODUCTION_DEPLOY_HOOK }}" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.LAUNCH_API_TOKEN }}" \
+            -d '{
+              "ref": "${{ github.sha }}",
+              "environment": "production", 
+              "branch": "main",
+              "version": "${{ needs.setup.outputs.version }}"
+            }'
+
+      - name: 🔄 Invalidate CDN Cache
+        run: |
+          curl -X POST "${{ secrets.LAUNCH_CDN_REVALIDATE_URL }}" \
+            -H "Authorization: Bearer ${{ secrets.LAUNCH_API_TOKEN }}" \
+            -d '{"paths": ["/widget/*", "/api/*", "/*"]}'
+
+      - name: 📦 Publish SDK to NPM
+        if: contains(github.event.head_commit.message, '[release]')
+        run: |
+          cd sdk
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > .npmrc
+          npm publish --access public
+
+      - name: 🏷️ Create GitHub Release
+        if: contains(github.event.head_commit.message, '[release]')
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.setup.outputs.version }}
+          release_name: Release v${{ needs.setup.outputs.version }}
+          body: |
+            ## 🚀 TechSurf Chat Platform v${{ needs.setup.outputs.version }}
+            
+            ### What's New
+            - Universal AI-powered chat widget
+            - Contentstack native integration
+            - Lightning-fast Groq AI responses
+            - One-line website integration
+            
+            ### Installation
+            ```bash
+            npm install @techsurf/universal-chat-widget@${{ needs.setup.outputs.version }}
+            ```
+            
+            ### CDN Usage
+            ```html
+            <script src="https://cdn.techsurf.ai/widget/v${{ needs.setup.outputs.version }}/universal-chat.js"></script>
+            ```
+            
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/v${{ needs.setup.outputs.previous-version }}...v${{ needs.setup.outputs.version }}
+          draft: false
+          prerelease: false
+
+      - name: 📊 Update deployment status
+        run: |
+          echo "🎉 Production deployment completed!" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 URL: https://techsurf-chat.launch.contentstack.com" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Version: ${{ needs.setup.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "🚀 Widget CDN: https://cdn.techsurf.ai/widget/v1/" >> $GITHUB_STEP_SUMMARY
+
+  # ================================
+  # NOTIFICATIONS
+  # ================================
+  notify:
+    name: 📢 Notifications
+    runs-on: ubuntu-latest
+    needs: [deploy-production, deploy-staging]
+    if: always()
+    
+    steps:
+      - name: 📢 Slack Notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#techsurf-deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: 📧 Email Notification
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "🚨 TechSurf Deployment Failed"
+          body: |
+            Deployment failed for commit ${{ github.sha }} on branch ${{ github.ref_name }}.
+            
+            Check the GitHub Actions logs for more details:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: team@techsurf.ai
+          from: deployments@techsurf.ai

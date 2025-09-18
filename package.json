@@ -1,0 +1,72 @@
+{
+  "name": "techsurf-chat-platform",
+  "version": "1.0.0",
+  "description": "Universal AI-powered chat widget platform with Contentstack integration",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server", 
+    "sdk"
+  ],
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:sdk\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm start",
+    "dev:sdk": "cd sdk && npm run dev",
+    
+    "build": "npm run build:production",
+    "build:production": "bash scripts/build-all.sh",
+    "build:server": "cd server && npm run build",
+    "build:client": "cd client && npm run build",
+    "build:sdk": "cd sdk && npm run build",
+    
+    "test": "concurrently \"npm run test:server\" \"npm run test:client\" \"npm run test:sdk\"",
+    "test:server": "cd server && npm test",
+    "test:client": "cd client && npm test",
+    "test:sdk": "cd sdk && npm test",
+    "test:e2e": "cd tests && npm run e2e",
+    
+    "start": "cd server && npm start",
+    "deploy": "bash scripts/deploy.sh",
+    
+    "postinstall": "npm run install:all",
+    "install:all": "cd client && npm ci && cd ../server && npm ci && cd ../sdk && npm ci",
+    
+    "clean": "rm -rf client/build server/dist sdk/dist",
+    "lint": "concurrently \"npm run lint:client\" \"npm run lint:server\" \"npm run lint:sdk\"",
+    "lint:client": "cd client && npm run lint",
+    "lint:server": "cd server && npm run lint",
+    "lint:sdk": "cd sdk && npm run lint",
+    
+    "type-check": "concurrently \"npm run type-check:client\" \"npm run type-check:server\" \"npm run type-check:sdk\"",
+    "type-check:client": "cd client && npx tsc --noEmit",
+    "type-check:server": "cd server && npx tsc --noEmit",
+    "type-check:sdk": "cd sdk && npx tsc --noEmit"
+  },
+  "keywords": [
+    "chat",
+    "widget", 
+    "ai",
+    "contentstack",
+    "customer-support",
+    "techsurf"
+  ],
+  "author": "TechSurf Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.2.0",
+    "eslint": "^8.50.0",
+    "prettier": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/techsurf-chat-platform.git"
+  }
+}
