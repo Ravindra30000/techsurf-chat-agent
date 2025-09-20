@@ -1,20 +1,29 @@
-import axios from 'axios';
+// # Contentstack Service Implementation
+
+// ## File: `server/src/services/contentstack-service.ts`
+
+
+import axios, { AxiosInstance } from 'axios';
+import { CacheService } from './cache-service.js';
 
 export interface ContentstackConfig {
   apiKey: string;
   deliveryToken: string;
-  environment?: string;
+  managementToken?: string;
+  environment: string;
   region?: string;
-  branch?: string;
+  host?: string;
+  cdnUrl?: string;
 }
 
 export interface ContentstackEntry {
   uid: string;
   title: string;
   url?: string;
-  content?: any;
   created_at: string;
   updated_at: string;
+  tags: string[];
+  locale: string;
   [key: string]: any;
 }
 
@@ -24,278 +33,346 @@ export interface ContentstackResponse {
   content_type_uid: string;
 }
 
-export class ContentstackService {
-  private config: ContentstackConfig;
-  private baseUrl: string;
+export interface QueryOptions {
+  limit?: number;
+  skip?: number;
+  include_count?: boolean;
+  locale?: string;
+  include_fallback?: boolean;
+  include_metadata?: boolean;
+}
 
-  constructor(config?: ContentstackConfig) {
-    this.config = config || this.getDefaultConfig();
-    
-    // Construct base URL based on region
-    const region = this.config.region || 'us';
-    if (region === 'eu') {
-      this.baseUrl = 'https://eu-cdn.contentstack.io/v3';
-    } else if (region === 'azure-na') {
-      this.baseUrl = 'https://azure-na-cdn.contentstack.io/v3';
-    } else if (region === 'azure-eu') {
-      this.baseUrl = 'https://azure-eu-cdn.contentstack.io/v3';
-    } else if (region === 'gcp-na') {
-      this.baseUrl = 'https://gcp-na-cdn.contentstack.io/v3';
-    } else {
-      this.baseUrl = 'https://cdn.contentstack.io/v3';
+export class ContentstackService {
+  private deliveryApi: AxiosInstance;
+  private managementApi?: AxiosInstance;
+  private config: ContentstackConfig;
+  private cacheService?: CacheService;
+  private readonly CACHE_TTL = 5 * 60; // 5 minutes
+
+  constructor(config?: Partial<ContentstackConfig>, cacheService?: CacheService) {
+    this.config = {
+      apiKey: config?.apiKey || process.env.CONTENTSTACK_API_KEY || '',
+      deliveryToken: config?.deliveryToken || process.env.CONTENTSTACK_DELIVERY_TOKEN || '',
+      managementToken: config?.managementToken || process.env.CONTENTSTACK_MANAGEMENT_TOKEN,
+      environment: config?.environment || process.env.CONTENTSTACK_ENVIRONMENT || 'production',
+      region: config?.region || process.env.CONTENTSTACK_REGION || 'us',
+      host: config?.host || process.env.CONTENTSTACK_API_HOST || 'cdn.contentstack.io',
+      cdnUrl: config?.cdnUrl || process.env.CONTENTSTACK_CDN || 'cdn.contentstack.io'
+    };
+
+    this.cacheService = cacheService;
+
+    // Initialize delivery API client
+    this.deliveryApi = axios.create({
+      baseURL: `https://${this.config.host}/v3`,
+      headers: {
+        'api_key': this.config.apiKey,
+        'access_token': this.config.deliveryToken,
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000,
+    });
+
+    // Initialize management API client if token is provided
+    if (this.config.managementToken) {
+      this.managementApi = axios.create({
+        baseURL: `https://api.contentstack.io/v3`,
+        headers: {
+          'api_key': this.config.apiKey,
+          'authorization': this.config.managementToken,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      });
     }
 
-    console.log(`🏗️ Contentstack service initialized for region: ${region}`);
+    console.log(`✅ ContentstackService initialized for environment: ${this.config.environment}`);
   }
 
-  private getDefaultConfig(): ContentstackConfig {
-    return {
-      apiKey: process.env.CONTENTSTACK_API_KEY || '',
-      deliveryToken: process.env.CONTENTSTACK_DELIVERY_TOKEN || '',
-      environment: process.env.CONTENTSTACK_ENVIRONMENT || 'production',
-      region: process.env.CONTENTSTACK_REGION || 'us',
-      branch: process.env.CONTENTSTACK_BRANCH || 'main'
-    };
-  }
-
-  private getHeaders() {
-    return {
-      'api_key': this.config.apiKey,
-      'access_token': this.config.deliveryToken,
-      'Content-Type': 'application/json',
-      'branch': this.config.branch || 'main'
-    };
-  }
-
-  // Query content with intelligent search
+  /**
+   * Query content by content type with search functionality
+   */
   public async queryContent(
     contentType: string,
-    searchQuery: string = '',
-    limit: number = 5
+    searchQuery?: string,
+    limit: number = 10,
+    options?: QueryOptions
   ): Promise<ContentstackEntry[]> {
     try {
-      console.log(`🔍 Querying Contentstack: ${contentType} with query "${searchQuery}"`);
+      const cacheKey = `contentstack:${contentType}:${searchQuery || 'all'}:${limit}:${JSON.stringify(options)}`;
       
+      // Try cache first
+      if (this.cacheService) {
+        const cached = await this.cacheService.get(cacheKey);
+        if (cached) {
+          console.log(`📦 Cache hit for Contentstack query: ${contentType}`);
+          return JSON.parse(cached);
+        }
+      }
+
+      console.log(`🔍 Querying Contentstack - Content Type: ${contentType}, Search: ${searchQuery || 'none'}`);
+
       // Build query parameters
       const params: any = {
         environment: this.config.environment,
-        locale: 'en-us',
-        limit: Math.min(limit, 20), // Cap at 20 for performance
-        include_count: true,
-        include_fallback: true
+        limit,
+        include_count: options?.include_count ?? true,
+        locale: options?.locale || 'en-us',
+        include_fallback: options?.include_fallback ?? true,
+        include_metadata: options?.include_metadata ?? false,
       };
 
-      // Add search parameters if query is provided
-      if (searchQuery.trim()) {
+      if (options?.skip) params.skip = options.skip;
+
+      // Add search query if provided
+      if (searchQuery && searchQuery.trim()) {
         // Search in title and other text fields
         params.query = JSON.stringify({
-          "$or": [
-            { "title": { "$regex": searchQuery, "$options": "i" } },
-            { "description": { "$regex": searchQuery, "$options": "i" } },
-            { "content": { "$regex": searchQuery, "$options": "i" } },
-            { "tags": { "$regex": searchQuery, "$options": "i" } }
+          $or: [
+            { title: { $regex: searchQuery, $options: 'i' } },
+            { description: { $regex: searchQuery, $options: 'i' } },
+            { content: { $regex: searchQuery, $options: 'i' } },
+            { tags: { $in: [searchQuery.toLowerCase()] } }
           ]
         });
       }
 
-      // Make API request
-      const response = await axios.get(
-        `${this.baseUrl}/content_types/${contentType}/entries`,
-        {
-          headers: this.getHeaders(),
-          params,
-          timeout: 10000
-        }
+      const response = await this.deliveryApi.get(
+        `/content_types/${contentType}/entries`,
+        { params }
       );
 
-      if (response.data && response.data.entries) {
-        console.log(`✅ Found ${response.data.entries.length} entries for "${contentType}"`);
-        return response.data.entries;
+      const entries = response.data.entries || [];
+      console.log(`✅ Found ${entries.length} entries for ${contentType}`);
+
+      // Cache the results
+      if (this.cacheService && entries.length > 0) {
+        await this.cacheService.set(cacheKey, JSON.stringify(entries), this.CACHE_TTL);
       }
 
-      console.log(`⚠️ No entries found for content type "${contentType}"`);
-      return [];
+      return entries;
 
     } catch (error) {
-      console.error(`❌ Contentstack API error:`, error);
+      console.error(`❌ Contentstack query error for ${contentType}:`, error);
       
       if (axios.isAxiosError(error)) {
+        if (error.response?.status === 404) {
+          console.warn(`⚠️  Content type '${contentType}' not found`);
+          return [];
+        }
         if (error.response?.status === 401) {
-          throw new Error('Contentstack authentication failed. Please check your API key and delivery token.');
-        } else if (error.response?.status === 404) {
-          throw new Error(`Content type "${contentType}" not found in Contentstack.`);
-        } else if (error.response?.status === 429) {
-          throw new Error('Contentstack API rate limit exceeded. Please try again later.');
+          throw new Error('Contentstack authentication failed. Please check your API credentials.');
         }
       }
       
-      throw new Error(`Failed to query Contentstack content: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(`Failed to query Contentstack content: ${error}`);
     }
   }
 
-  // Get a specific entry by UID
-  public async getEntry(contentType: string, uid: string): Promise<ContentstackEntry | null> {
+  /**
+   * Get a specific entry by UID
+   */
+  public async getEntry(
+    contentType: string,
+    uid: string,
+    options?: QueryOptions
+  ): Promise<ContentstackEntry | null> {
     try {
-      console.log(`📄 Fetching entry: ${contentType}/${uid}`);
+      const cacheKey = `contentstack:entry:${contentType}:${uid}`;
       
-      const response = await axios.get(
-        `${this.baseUrl}/content_types/${contentType}/entries/${uid}`,
-        {
-          headers: this.getHeaders(),
-          params: {
-            environment: this.config.environment,
-            locale: 'en-us'
-          },
-          timeout: 10000
+      if (this.cacheService) {
+        const cached = await this.cacheService.get(cacheKey);
+        if (cached) {
+          return JSON.parse(cached);
         }
-      );
-
-      if (response.data && response.data.entry) {
-        console.log(`✅ Retrieved entry: ${uid}`);
-        return response.data.entry;
       }
 
-      return null;
+      const params: any = {
+        environment: this.config.environment,
+        locale: options?.locale || 'en-us',
+        include_fallback: options?.include_fallback ?? true,
+      };
+
+      const response = await this.deliveryApi.get(
+        `/content_types/${contentType}/entries/${uid}`,
+        { params }
+      );
+
+      const entry = response.data.entry;
+      
+      if (this.cacheService && entry) {
+        await this.cacheService.set(cacheKey, JSON.stringify(entry), this.CACHE_TTL);
+      }
+
+      return entry;
+
     } catch (error) {
-      console.error(`❌ Failed to fetch entry ${uid}:`, error);
-      throw new Error(`Failed to fetch entry: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return null;
+      }
+      console.error(`❌ Error fetching entry ${uid}:`, error);
+      throw error;
     }
   }
 
-  // Get all content types
-  public async getContentTypes(): Promise<string[]> {
+  /**
+   * Search across multiple content types
+   */
+  public async globalSearch(
+    searchQuery: string,
+    contentTypes: string[] = ['product', 'article', 'page', 'faq'],
+    limit: number = 5
+  ): Promise<{ contentType: string; entries: ContentstackEntry[] }[]> {
+    const results = await Promise.allSettled(
+      contentTypes.map(async (contentType) => {
+        const entries = await this.queryContent(contentType, searchQuery, limit);
+        return { contentType, entries };
+      })
+    );
+
+    return results
+      .filter((result): result is PromiseFulfilledResult<{ contentType: string; entries: ContentstackEntry[] }> => 
+        result.status === 'fulfilled')
+      .map(result => result.value)
+      .filter(result => result.entries.length > 0);
+  }
+
+  /**
+   * Get all content types
+   */
+  public async getContentTypes(): Promise<any[]> {
     try {
-      console.log('📋 Fetching content types...');
-      
-      const response = await axios.get(
-        `${this.baseUrl}/content_types`,
-        {
-          headers: this.getHeaders(),
-          timeout: 10000
+      const response = await this.deliveryApi.get('/content_types', {
+        params: { 
+          environment: this.config.environment,
+          include_count: true 
         }
-      );
+      });
 
-      if (response.data && response.data.content_types) {
-        const contentTypes = response.data.content_types.map((ct: any) => ct.uid);
-        console.log(`✅ Found ${contentTypes.length} content types:`, contentTypes);
-        return contentTypes;
-      }
-
+      return response.data.content_types || [];
+    } catch (error) {
+      console.error('❌ Error fetching content types:', error);
       return [];
-    } catch (error) {
-      console.error('❌ Failed to fetch content types:', error);
-      throw new Error(`Failed to fetch content types: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  // Smart content type detection based on query
-  public detectContentType(query: string): string {
-    const queryLower = query.toLowerCase();
-    
-    // Product-related queries
-    if (queryLower.includes('product') || queryLower.includes('item') || 
-        queryLower.includes('buy') || queryLower.includes('shop') ||
-        queryLower.includes('price') || queryLower.includes('catalog')) {
-      return 'product';
-    }
-    
-    // Article/blog-related queries
-    if (queryLower.includes('article') || queryLower.includes('blog') || 
-        queryLower.includes('post') || queryLower.includes('guide') ||
-        queryLower.includes('how to') || queryLower.includes('tutorial')) {
-      return 'article';
-    }
-    
-    // Event-related queries
-    if (queryLower.includes('event') || queryLower.includes('webinar') || 
-        queryLower.includes('conference') || queryLower.includes('meeting')) {
-      return 'event';
-    }
-    
-    // FAQ/support queries
-    if (queryLower.includes('help') || queryLower.includes('support') || 
-        queryLower.includes('faq') || queryLower.includes('question')) {
-      return 'faq';
-    }
-    
-    // Team/about queries
-    if (queryLower.includes('team') || queryLower.includes('about') || 
-        queryLower.includes('staff') || queryLower.includes('member')) {
-      return 'team_member';
-    }
-    
-    // Default to a generic content type
-    return 'page';
-  }
-
-  // Format entries for AI consumption
-  public formatEntriesForAI(entries: ContentstackEntry[]): string {
-    if (!entries.length) {
-      return 'No relevant content found in the CMS.';
-    }
-
-    return entries.map((entry, index) => {
-      const title = entry.title || 'Untitled';
-      const description = entry.description || entry.content || 'No description available';
-      const url = entry.url || entry.href || '';
-      
-      return `${index + 1}. **${title}**${url ? ` (${url})` : ''}
-${description.substring(0, 200)}${description.length > 200 ? '...' : ''}`;
-    }).join('\n\n');
-  }
-
-  // Health check method
-  public async healthCheck(): Promise<{ status: string; message: string }> {
+  /**
+   * Health check for Contentstack connectivity
+   */
+  public async healthCheck(): Promise<{ status: 'healthy' | 'unhealthy'; details: any }> {
     try {
-      const response = await axios.get(
-        `${this.baseUrl}/content_types`,
-        {
-          headers: this.getHeaders(),
-          params: { limit: 1 },
-          timeout: 5000
-        }
-      );
-
-      if (response.status === 200) {
-        return {
-          status: 'healthy',
-          message: 'Contentstack API is accessible'
-        };
-      }
+      const response = await this.deliveryApi.get('/content_types', {
+        params: { environment: this.config.environment, limit: 1 }
+      });
 
       return {
-        status: 'unhealthy',
-        message: 'Unexpected response from Contentstack API'
+        status: 'healthy',
+        details: {
+          environment: this.config.environment,
+          contentTypes: response.data.count || 0,
+          region: this.config.region
+        }
       };
     } catch (error) {
-      console.error('Contentstack health check failed:', error);
-      
       return {
         status: 'unhealthy',
-        message: error instanceof Error ? error.message : 'Unknown error'
+        details: {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          environment: this.config.environment
+        }
       };
     }
   }
 
-  // Validate configuration
-  public validateConfig(): { valid: boolean; errors: string[] } {
-    const errors: string[] = [];
-    
-    if (!this.config.apiKey) {
-      errors.push('Missing Contentstack API key');
+  /**
+   * Smart content recommendation based on user query
+   */
+  public async recommendContent(
+    userQuery: string,
+    userContext?: any
+  ): Promise<ContentstackEntry[]> {
+    try {
+      // Extract keywords from user query
+      const keywords = this.extractKeywords(userQuery);
+      
+      // Search across different content types with different strategies
+      const searchPromises = [
+        // Direct search in products if query seems product-related
+        this.isProductQuery(userQuery) ? 
+          this.queryContent('product', userQuery, 3) : Promise.resolve([]),
+        
+        // Search in FAQs if query is a question
+        this.isQuestionQuery(userQuery) ? 
+          this.queryContent('faq', userQuery, 3) : Promise.resolve([]),
+        
+        // Search in articles/help docs
+        this.queryContent('article', userQuery, 2),
+        
+        // Search in general pages
+        this.queryContent('page', userQuery, 2)
+      ];
+
+      const results = await Promise.allSettled(searchPromises);
+      
+      const allEntries = results
+        .filter((result): result is PromiseFulfilledResult<ContentstackEntry[]> => 
+          result.status === 'fulfilled')
+        .flatMap(result => result.value);
+
+      // Remove duplicates and sort by relevance
+      const uniqueEntries = this.deduplicateEntries(allEntries);
+      
+      return uniqueEntries.slice(0, 5); // Return top 5 most relevant
+
+    } catch (error) {
+      console.error('❌ Content recommendation error:', error);
+      return [];
     }
-    
-    if (!this.config.deliveryToken) {
-      errors.push('Missing Contentstack delivery token');
-    }
-    
-    if (!this.config.environment) {
-      errors.push('Missing Contentstack environment');
-    }
-    
+  }
+
+  private extractKeywords(query: string): string[] {
+    return query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(word => word.length > 2)
+      .filter(word => !['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for'].includes(word));
+  }
+
+  private isProductQuery(query: string): boolean {
+    const productKeywords = ['buy', 'purchase', 'product', 'item', 'price', 'cost', 'order'];
+    return productKeywords.some(keyword => 
+      query.toLowerCase().includes(keyword)
+    );
+  }
+
+  private isQuestionQuery(query: string): boolean {
+    const questionWords = ['how', 'what', 'why', 'when', 'where', 'who', 'can', 'do', 'does'];
+    return questionWords.some(word => 
+      query.toLowerCase().startsWith(word) ||
+      query.includes('?')
+    );
+  }
+
+  private deduplicateEntries(entries: ContentstackEntry[]): ContentstackEntry[] {
+    const seen = new Set();
+    return entries.filter(entry => {
+      const key = `${entry.uid}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  /**
+   * Get configuration info
+   */
+  public getConfig(): Omit<ContentstackConfig, 'deliveryToken' | 'managementToken'> {
     return {
-      valid: errors.length === 0,
-      errors
+      apiKey: this.config.apiKey ? '***' : '',
+      environment: this.config.environment,
+      region: this.config.region,
+      host: this.config.host,
+      cdnUrl: this.config.cdnUrl
     };
   }
 }

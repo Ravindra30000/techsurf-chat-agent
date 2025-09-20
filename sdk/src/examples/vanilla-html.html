@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TechSurf Chat Widget - Vanilla HTML Example</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 40px;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5rem;
+        }
+        
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 40px 0;
+        }
+        
+        .feature-card {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 15px;
+            text-align: center;
+        }
+        
+        .controls {
+            text-align: center;
+            margin: 40px 0;
+        }
+        
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 0 10px;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 123, 255, 0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 TechSurf Chat Widget Demo</h1>
+        <p style="text-align: center; font-size: 1.2rem; margin-bottom: 40px;">
+            Experience the power of AI-driven customer support
+        </p>
+        
+        <div class="feature-grid">
+            <div class="feature-card">
+                <h3>🤖 Smart AI Assistant</h3>
+                <p>Powered by advanced language models for intelligent responses</p>
+            </div>
+            <div class="feature-card">
+                <h3>📚 Contentstack Integration</h3>
+                <p>Automatically retrieves relevant content from your CMS</p>
+            </div>
+            <div class="feature-card">
+                <h3>⚡ Real-time Streaming</h3>
+                <p>Instant responses with smooth streaming technology</p>
+            </div>
+            <div class="feature-card">
+                <h3>🎨 Customizable Design</h3>
+                <p>Matches your brand with flexible theming options</p>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button onclick="openChat()">Open Chat</button>
+            <button onclick="closeChat()">Close Chat</button>
+            <button onclick="sendTestMessage()">Send Test Message</button>
+            <button onclick="toggleTheme()">Toggle Theme</button>
+        </div>
+        
+        <div style="text-align: center; margin-top: 40px; padding: 20px; background: rgba(0, 0, 0, 0.2); border-radius: 10px;">
+            <h3>Try asking:</h3>
+            <p>"What products do you offer?" • "How can I contact support?" • "Tell me about your services"</p>
+        </div>
+    </div>
+
+    <!-- Load TechSurf Chat Widget -->
+    <script src="../dist/techsurf-chat.min.js"></script>
+    <script>
+        // Initialize the chat widget
+        const chatWidget = new TechSurfChat.UniversalChatWidget({
+            apiKey: 'ts_demo_key_1234567890abcdef', // Replace with your API key
+            tenantId: 'demo-tenant-id', // Replace with your tenant ID
+            apiUrl: 'http://localhost:5000', // Replace with your API URL
+            title: 'Demo Chat Support',
+            welcomeMessage: 'Hello! I\'m your AI assistant. I can help you with questions about our products and services.',
+            position: 'bottom-right',
+            theme: 'light',
+            primaryColor: '#007bff',
+            showOnLoad: false,
+            websiteContext: {
+                page: 'demo-page',
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            }
+        });
+
+        // Initialize the widget
+        chatWidget.init().then(() => {
+            console.log('✅ TechSurf Chat Widget initialized successfully');
+            
+            // Set up event listeners
+            chatWidget.on('opened', () => {
+                console.log('Chat widget opened');
+                gtag && gtag('event', 'chat_opened'); // Analytics tracking
+            });
+            
+            chatWidget.on('closed', () => {
+                console.log('Chat widget closed');
+            });
+            
+            chatWidget.on('messageAdded', (message) => {
+                console.log('New message:', message);
+                
+                // Track user messages for analytics
+                if (message.role === 'user') {
+                    gtag && gtag('event', 'chat_message_sent', {
+                        message_content: message.content.substring(0, 50) + '...'
+                    });
+                }
+            });
+            
+        }).catch((error) => {
+            console.error('❌ Failed to initialize chat widget:', error);
+            alert('Failed to load chat widget. Please refresh the page.');
+        });
+
+        // Control functions
+        function openChat() {
+            chatWidget.open();
+        }
+
+        function closeChat() {
+            chatWidget.close();
+        }
+
+        function sendTestMessage() {
+            chatWidget.open();
+            setTimeout(() => {
+                chatWidget.sendMessage('Hello! Can you tell me about your services?');
+            }, 500);
+        }
+
+        let currentTheme = 'light';
+        function toggleTheme() {
+            // Note: Theme switching requires re-initialization in current implementation
+            alert('Theme switching will be available in the next version. Currently requires page refresh.');
+        }
+
+        // Auto-open chat after 10 seconds (optional)
+        setTimeout(() => {
+            if (!chatWidget.isWidgetOpen()) {
+                console.log('Auto-opening chat widget...');
+                chatWidget.open();
+            }
+        }, 10000);
+    </script>
+</body>
+</html>

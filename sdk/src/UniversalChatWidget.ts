@@ -1,357 +1,793 @@
-import {
-  WidgetConfig,
-  WidgetState,
-  ChatMessage,
-  ChatResponse,
-  IUniversalChatWidget,
-  WidgetError,
-  DOMElements,
-  StreamChunk
-} from './types';
+import { ChatWidgetConfig, ChatMessage, ChatSession, WidgetTheme, WidgetEvents } from './types.js';
 
-export class UniversalChatWidget implements IUniversalChatWidget {
-  public config: WidgetConfig;
-  public state: WidgetState;
-  private elements: Partial<DOMElements> = {};
-  private isInitialized = false;
+export class UniversalChatWidget {
+  private config: ChatWidgetConfig;
+  private container: HTMLElement | null = null;
+  private isInitialized: boolean = false;
+  private isOpen: boolean = false;
+  private eventListeners: { [key: string]: Function[] } = {};
+  private messages: ChatMessage[] = [];
   private sessionId: string;
-  private abortController?: AbortController;
+  private socket: any = null;
+  private isConnected: boolean = false;
 
-  constructor(config: WidgetConfig) {
-    this.config = this.mergeConfig(config);
-    this.sessionId = this.generateSessionId();
-    
-    this.state = {
-      isOpen: false,
-      isLoading: false,
-      isConnected: false,
-      messages: [],
-      currentInput: '',
-      error: null,
-    };
-
-    console.log('🚀 TechSurf Universal Chat Widget initialized');
-    this.trackEvent('widget_initialized');
-  }
-
-  private mergeConfig(config: WidgetConfig): WidgetConfig {
-    const defaultConfig: Partial<WidgetConfig> = {
-      endpoint: 'https://api.techsurf.ai',
+  constructor(config: ChatWidgetConfig) {
+    this.config = {
       position: 'bottom-right',
-      theme: {
-        primaryColor: '#007bff',
-        backgroundColor: '#ffffff',
-        textColor: '#333333',
-        borderRadius: 12,
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        fontSize: '14px',
-      },
-      autoDetect: true,
-      enableAnalytics: true,
-      enableSounds: false,
+      theme: 'light',
+      showOnLoad: false,
+      enableSounds: true,
+      enableTypingIndicator: true,
+      maxMessages: 50,
+      ...config
     };
-
-    return { ...defaultConfig, ...config };
+    
+    this.sessionId = this.generateSessionId();
+    this.bindMethods();
   }
 
-  public async mount(selector: string, customConfig?: Partial<WidgetConfig>): Promise<void> {
+  private bindMethods(): void {
+    this.open = this.open.bind(this);
+    this.close = this.close.bind(this);
+    this.toggle = this.toggle.bind(this);
+    this.sendMessage = this.sendMessage.bind(this);
+  }
+
+  private generateSessionId(): string {
+    return 'session_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+  }
+
+  public async init(): Promise<void> {
+    if (this.isInitialized) {
+      console.warn('TechSurf Chat Widget is already initialized');
+      return;
+    }
+
     try {
-      if (this.isInitialized) {
-        console.warn('⚠️ Widget already initialized');
-        return;
-      }
-
-      // Update config if provided
-      if (customConfig) {
-        this.config = { ...this.config, ...customConfig };
-      }
-
-      // Auto-detect Contentstack configuration if enabled
-      if (this.config.autoDetect && !this.config.contentstack) {
-        this.config.contentstack = this.autoDetectContentstack();
-      }
-
-      // Find mount target
-      const mountTarget = typeof selector === 'string' 
-        ? document.querySelector(selector) 
-        : selector;
-
-      if (!mountTarget) {
-        throw new WidgetError('Mount target not found', 'MOUNT_ERROR');
-      }
-
-      // Create widget elements
-      this.createWidgetElements(mountTarget as HTMLElement);
-      
-      // Set up event listeners
+      await this.validateConfig();
+      await this.loadStyles();
+      this.createWidget();
       this.setupEventListeners();
       
-      // Apply styles
-      this.applyStyles();
-      
-      // Initialize connection
-      await this.initializeConnection();
-      
+      if (this.config.showOnLoad) {
+        this.open();
+      }
+
       this.isInitialized = true;
-      this.state.isConnected = true;
+      this.emit('initialized', { sessionId: this.sessionId });
       
-      console.log('✅ Widget mounted successfully');
-      this.trackEvent('widget_mounted');
-      
-      // Call onMount callback
-      if (this.config.onMount) {
-        this.config.onMount();
-      }
-      
+      console.log('✅ TechSurf Chat Widget initialized successfully');
     } catch (error) {
-      console.error('❌ Failed to mount widget:', error);
-      this.state.error = error instanceof Error ? error.message : 'Failed to mount widget';
-      
-      if (this.config.onError) {
-        this.config.onError(error instanceof Error ? error : new Error('Mount failed'));
-      }
-      
+      console.error('❌ Failed to initialize TechSurf Chat Widget:', error);
       throw error;
     }
   }
 
-  public unmount(): void {
+  private async validateConfig(): Promise<void> {
+    if (!this.config.apiKey) {
+      throw new Error('API key is required');
+    }
+
+    if (!this.config.tenantId) {
+      throw new Error('Tenant ID is required');
+    }
+
+    if (!this.config.apiUrl) {
+      throw new Error('API URL is required');
+    }
+
+    // Validate API key format
+    if (!this.config.apiKey.startsWith('ts_')) {
+      throw new Error('Invalid API key format');
+    }
+
+    // Test API connection
     try {
-      // Remove event listeners
-      this.removeEventListeners();
-      
-      // Remove DOM elements
-      if (this.elements.container) {
-        this.elements.container.remove();
+      const response = await fetch(`${this.config.apiUrl}/health`, {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.config.apiKey,
+          'x-tenant-id': this.config.tenantId
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`API health check failed: ${response.status}`);
       }
-      
-      // Cancel ongoing requests
-      if (this.abortController) {
-        this.abortController.abort();
-      }
-      
-      // Reset state
-      this.isInitialized = false;
-      this.state.isConnected = false;
-      this.elements = {};
-      
-      console.log('✅ Widget unmounted');
-      this.trackEvent('widget_unmounted');
-      
-      if (this.config.onUnmount) {
-        this.config.onUnmount();
-      }
-      
     } catch (error) {
-      console.error('❌ Error during unmount:', error);
+      console.warn('⚠️ API health check failed, widget may not function properly:', error);
     }
   }
 
-  public open(): void {
-    if (!this.isInitialized) {
-      console.warn('⚠️ Widget not initialized');
-      return;
+  private async loadStyles(): Promise<void> {
+    if (document.getElementById('techsurf-chat-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'techsurf-chat-styles';
+    style.textContent = this.getCSS();
+    document.head.appendChild(style);
+  }
+
+  private getCSS(): string {
+    const theme = this.config.theme === 'dark' ? this.getDarkTheme() : this.getLightTheme();
+    const position = this.getPositionStyles();
+
+    return `
+      .techsurf-chat-widget {
+        position: fixed;
+        ${position}
+        z-index: 999999;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+      }
+
+      .techsurf-chat-button {
+        width: 60px;
+        height: 60px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, ${theme.primary}, ${theme.primaryDark});
+        border: none;
+        cursor: pointer;
+        box-shadow: 0 4px 20px rgba(0, 123, 255, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .techsurf-chat-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px rgba(0, 123, 255, 0.4);
+      }
+
+      .techsurf-chat-button svg {
+        width: 24px;
+        height: 24px;
+        fill: white;
+        transition: transform 0.3s ease;
+      }
+
+      .techsurf-chat-button.open svg {
+        transform: rotate(45deg);
+      }
+
+      .techsurf-chat-panel {
+        width: 350px;
+        height: 500px;
+        background: ${theme.background};
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        transform: translateY(20px) scale(0.95);
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        margin-bottom: 10px;
+      }
+
+      .techsurf-chat-panel.open {
+        transform: translateY(0) scale(1);
+        opacity: 1;
+        visibility: visible;
+      }
+
+      .techsurf-chat-header {
+        background: linear-gradient(135deg, ${theme.primary}, ${theme.primaryDark});
+        color: white;
+        padding: 16px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: between;
+      }
+
+      .techsurf-chat-header-content {
+        flex: 1;
+      }
+
+      .techsurf-chat-title {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 0;
+      }
+
+      .techsurf-chat-subtitle {
+        font-size: 12px;
+        opacity: 0.8;
+        margin: 2px 0 0 0;
+      }
+
+      .techsurf-chat-close {
+        background: none;
+        border: none;
+        color: white;
+        cursor: pointer;
+        padding: 4px;
+        margin-left: 10px;
+        border-radius: 4px;
+        opacity: 0.8;
+        transition: opacity 0.2s ease;
+      }
+
+      .techsurf-chat-close:hover {
+        opacity: 1;
+      }
+
+      .techsurf-chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        background: ${theme.background};
+      }
+
+      .techsurf-chat-message {
+        margin-bottom: 16px;
+        display: flex;
+        align-items: flex-start;
+      }
+
+      .techsurf-chat-message.user {
+        flex-direction: row-reverse;
+      }
+
+      .techsurf-chat-message-content {
+        max-width: 80%;
+        padding: 12px 16px;
+        border-radius: 18px;
+        font-size: 14px;
+        line-height: 1.4;
+        word-wrap: break-word;
+      }
+
+      .techsurf-chat-message.user .techsurf-chat-message-content {
+        background: ${theme.primary};
+        color: white;
+        border-bottom-right-radius: 6px;
+      }
+
+      .techsurf-chat-message.assistant .techsurf-chat-message-content {
+        background: ${theme.messageBg};
+        color: ${theme.text};
+        border-bottom-left-radius: 6px;
+      }
+
+      .techsurf-chat-message-time {
+        font-size: 11px;
+        color: ${theme.textSecondary};
+        margin-top: 4px;
+        margin-left: 12px;
+        margin-right: 12px;
+      }
+
+      .techsurf-chat-input {
+        padding: 16px 20px;
+        border-top: 1px solid ${theme.border};
+        background: ${theme.background};
+      }
+
+      .techsurf-chat-input-container {
+        display: flex;
+        align-items: flex-end;
+        background: ${theme.inputBg};
+        border-radius: 25px;
+        padding: 8px 12px;
+        border: 1px solid ${theme.border};
+        transition: border-color 0.2s ease;
+      }
+
+      .techsurf-chat-input-container:focus-within {
+        border-color: ${theme.primary};
+      }
+
+      .techsurf-chat-input-field {
+        flex: 1;
+        border: none;
+        outline: none;
+        background: transparent;
+        font-size: 14px;
+        color: ${theme.text};
+        resize: none;
+        max-height: 100px;
+        min-height: 20px;
+        padding: 6px 8px;
+        font-family: inherit;
+      }
+
+      .techsurf-chat-send-button {
+        background: ${theme.primary};
+        border: none;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: 8px;
+        transition: all 0.2s ease;
+        opacity: 0.7;
+      }
+
+      .techsurf-chat-send-button:hover {
+        opacity: 1;
+        transform: translateY(-1px);
+      }
+
+      .techsurf-chat-send-button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .techsurf-chat-send-button svg {
+        width: 16px;
+        height: 16px;
+        fill: white;
+      }
+
+      .techsurf-chat-typing {
+        padding: 8px 16px;
+        color: ${theme.textSecondary};
+        font-size: 13px;
+        font-style: italic;
+      }
+
+      .techsurf-chat-typing-dots {
+        display: inline-block;
+      }
+
+      .techsurf-chat-typing-dots::after {
+        content: '';
+        animation: techsurf-dots 1.5s infinite;
+      }
+
+      @keyframes techsurf-dots {
+        0%, 20% { content: '.'; }
+        40% { content: '..'; }
+        60%, 100% { content: '...'; }
+      }
+
+      .techsurf-chat-welcome {
+        text-align: center;
+        padding: 40px 20px;
+        color: ${theme.textSecondary};
+      }
+
+      .techsurf-chat-welcome h3 {
+        margin: 0 0 8px 0;
+        color: ${theme.text};
+        font-size: 18px;
+      }
+
+      .techsurf-chat-welcome p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .techsurf-chat-powered-by {
+        text-align: center;
+        padding: 8px;
+        font-size: 11px;
+        color: ${theme.textSecondary};
+        background: ${theme.background};
+        border-top: 1px solid ${theme.border};
+      }
+
+      .techsurf-chat-powered-by a {
+        color: ${theme.primary};
+        text-decoration: none;
+      }
+
+      @media (max-width: 480px) {
+        .techsurf-chat-panel {
+          width: 100vw;
+          height: 100vh;
+          border-radius: 0;
+          margin: 0;
+        }
+        
+        .techsurf-chat-widget {
+          top: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          left: 0 !important;
+        }
+      }
+    `;
+  }
+
+  private getLightTheme() {
+    return {
+      primary: this.config.primaryColor || '#007bff',
+      primaryDark: this.config.primaryColor ? this.darkenColor(this.config.primaryColor, 10) : '#0056b3',
+      background: '#ffffff',
+      messageBg: '#f8f9fa',
+      inputBg: '#ffffff',
+      text: '#212529',
+      textSecondary: '#6c757d',
+      border: '#e9ecef'
+    };
+  }
+
+  private getDarkTheme() {
+    return {
+      primary: this.config.primaryColor || '#007bff',
+      primaryDark: this.config.primaryColor ? this.darkenColor(this.config.primaryColor, 10) : '#0056b3',
+      background: '#2d3748',
+      messageBg: '#4a5568',
+      inputBg: '#4a5568',
+      text: '#ffffff',
+      textSecondary: '#a0aec0',
+      border: '#4a5568'
+    };
+  }
+
+  private darkenColor(color: string, percent: number): string {
+    // Simple color darkening function
+    const f = parseInt(color.slice(1), 16);
+    const t = percent < 0 ? 0 : 255;
+    const p = percent < 0 ? percent * -1 : percent;
+    const R = f >> 16;
+    const G = f >> 8 & 0x00FF;
+    const B = f & 0x0000FF;
+    return "#" + (0x1000000 + (Math.round((t - R) * p) + R) * 0x10000 + (Math.round((t - G) * p) + G) * 0x100 + (Math.round((t - B) * p) + B)).toString(16).slice(1);
+  }
+
+  private getPositionStyles(): string {
+    const margin = '20px';
+    
+    switch (this.config.position) {
+      case 'bottom-left':
+        return `bottom: ${margin}; left: ${margin};`;
+      case 'bottom-right':
+        return `bottom: ${margin}; right: ${margin};`;
+      case 'top-left':
+        return `top: ${margin}; left: ${margin};`;
+      case 'top-right':
+        return `top: ${margin}; right: ${margin};`;
+      default:
+        return `bottom: ${margin}; right: ${margin};`;
+    }
+  }
+
+  private createWidget(): void {
+    // Remove existing widget if any
+    const existing = document.getElementById('techsurf-chat-widget');
+    if (existing) existing.remove();
+
+    // Create main container
+    this.container = document.createElement('div');
+    this.container.id = 'techsurf-chat-widget';
+    this.container.className = 'techsurf-chat-widget';
+
+    // Create HTML structure
+    this.container.innerHTML = `
+      <div class="techsurf-chat-panel">
+        <div class="techsurf-chat-header">
+          <div class="techsurf-chat-header-content">
+            <h4 class="techsurf-chat-title">${this.config.title || 'Chat with us'}</h4>
+            <p class="techsurf-chat-subtitle">We typically reply in a few minutes</p>
+          </div>
+          <button class="techsurf-chat-close" type="button">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 8.586L15.657 2.929a1 1 0 111.414 1.414L11.414 10l5.657 5.657a1 1 0 01-1.414 1.414L10 11.414l-5.657 5.657a1 1 0 01-1.414-1.414L8.586 10 2.929 4.343A1 1 0 014.343 2.929L10 8.586z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="techsurf-chat-messages">
+          <div class="techsurf-chat-welcome">
+            <h3>👋 Welcome!</h3>
+            <p>${this.config.welcomeMessage || 'Hello! How can I help you today?'}</p>
+          </div>
+        </div>
+        <div class="techsurf-chat-typing" style="display: none;">
+          <span class="techsurf-chat-typing-dots">AI is typing</span>
+        </div>
+        <div class="techsurf-chat-input">
+          <div class="techsurf-chat-input-container">
+            <textarea 
+              class="techsurf-chat-input-field" 
+              placeholder="Type your message..."
+              rows="1"
+            ></textarea>
+            <button class="techsurf-chat-send-button" type="button">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M15.854.146a.5.5 0 01.11.54L13.026 8.74a.5.5 0 01-.456.302H8.5V4.5a.5.5 0 00-.854-.353L.646 11.147a.5.5 0 00.708.707l6.5-6.5V10.5a.5.5 0 00.5.5h4.07l2.938-7.94a.5.5 0 01.692-.414z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        ${this.config.showPoweredBy !== false ? `
+          <div class="techsurf-chat-powered-by">
+            Powered by <a href="https://techsurf.ai" target="_blank">TechSurf</a>
+          </div>
+        ` : ''}
+      </div>
+      <button class="techsurf-chat-button" type="button">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4v3c0 .6.4 1 1 1 .2 0 .3 0 .4-.1L14.5 18H20c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 13h-4.8l-2.7 2.7V15H5V5h14v10z"/>
+        </svg>
+      </button>
+    `;
+
+    document.body.appendChild(this.container);
+  }
+
+  private setupEventListeners(): void {
+    if (!this.container) return;
+
+    const button = this.container.querySelector('.techsurf-chat-button') as HTMLButtonElement;
+    const closeButton = this.container.querySelector('.techsurf-chat-close') as HTMLButtonElement;
+    const sendButton = this.container.querySelector('.techsurf-chat-send-button') as HTMLButtonElement;
+    const input = this.container.querySelector('.techsurf-chat-input-field') as HTMLTextAreaElement;
+
+    button?.addEventListener('click', this.toggle);
+    closeButton?.addEventListener('click', this.close);
+    sendButton?.addEventListener('click', () => this.handleSendMessage());
+    
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        this.handleSendMessage();
+      }
+    });
+
+    input?.addEventListener('input', this.handleInputResize);
+  }
+
+  private handleInputResize = (e: Event): void => {
+    const textarea = e.target as HTMLTextAreaElement;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 100) + 'px';
+  };
+
+  private async handleSendMessage(): Promise<void> {
+    const input = this.container?.querySelector('.techsurf-chat-input-field') as HTMLTextAreaElement;
+    const message = input?.value.trim();
+
+    if (!message || !this.container) return;
+
+    // Clear input
+    input.value = '';
+    input.style.height = 'auto';
+
+    // Add user message to UI
+    this.addMessageToUI({
+      role: 'user',
+      content: message,
+      timestamp: new Date(),
+      id: this.generateMessageId()
+    });
+
+    // Send message to API
+    try {
+      await this.sendMessage(message);
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      this.addMessageToUI({
+        role: 'assistant',
+        content: 'Sorry, I encountered an error. Please try again.',
+        timestamp: new Date(),
+        id: this.generateMessageId()
+      });
+    }
+  }
+
+  private generateMessageId(): string {
+    return 'msg_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+  }
+
+  private addMessageToUI(message: ChatMessage): void {
+    const messagesContainer = this.container?.querySelector('.techsurf-chat-messages');
+    const welcomeMessage = messagesContainer?.querySelector('.techsurf-chat-welcome');
+    
+    if (welcomeMessage && this.messages.length === 0) {
+      welcomeMessage.remove();
     }
 
-    this.state.isOpen = true;
-    this.elements.chatWindow?.classList.add('open');
-    this.elements.trigger?.classList.add('hidden');
+    if (!messagesContainer) return;
+
+    const messageEl = document.createElement('div');
+    messageEl.className = `techsurf-chat-message ${message.role}`;
+    messageEl.innerHTML = `
+      <div class="techsurf-chat-message-content">
+        ${this.formatMessageContent(message.content)}
+      </div>
+      <div class="techsurf-chat-message-time">
+        ${this.formatTime(message.timestamp)}
+      </div>
+    `;
+
+    messagesContainer.appendChild(messageEl);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+    // Store message
+    this.messages.push(message);
     
-    // Focus on input
-    const input = this.elements.inputArea?.querySelector('input') as HTMLInputElement;
-    if (input) {
-      setTimeout(() => input.focus(), 100);
+    // Limit messages in memory
+    if (this.messages.length > (this.config.maxMessages || 50)) {
+      this.messages = this.messages.slice(-this.config.maxMessages!);
     }
-    
-    this.trackEvent('widget_opened');
-    
-    if (this.config.onOpen) {
-      this.config.onOpen();
+
+    this.emit('messageAdded', message);
+  }
+
+  private formatMessageContent(content: string): string {
+    // Basic markdown-like formatting
+    return content
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/`(.*?)`/g, '<code>$1</code>')
+      .replace(/\n/g, '<br>');
+  }
+
+  private formatTime(timestamp: Date): string {
+    return timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  private showTypingIndicator(): void {
+    const typingEl = this.container?.querySelector('.techsurf-chat-typing') as HTMLElement;
+    if (typingEl) {
+      typingEl.style.display = 'block';
     }
+  }
+
+  private hideTypingIndicator(): void {
+    const typingEl = this.container?.querySelector('.techsurf-chat-typing') as HTMLElement;
+    if (typingEl) {
+      typingEl.style.display = 'none';
+    }
+  }
+
+  // Public API methods
+  public open(): void {
+    if (!this.container) return;
+    
+    const panel = this.container.querySelector('.techsurf-chat-panel');
+    const button = this.container.querySelector('.techsurf-chat-button');
+    
+    panel?.classList.add('open');
+    button?.classList.add('open');
+    
+    this.isOpen = true;
+    this.emit('opened');
+    
+    // Focus input
+    const input = this.container.querySelector('.techsurf-chat-input-field') as HTMLTextAreaElement;
+    setTimeout(() => input?.focus(), 300);
   }
 
   public close(): void {
-    this.state.isOpen = false;
-    this.elements.chatWindow?.classList.remove('open');
-    this.elements.trigger?.classList.remove('hidden');
+    if (!this.container) return;
     
-    this.trackEvent('widget_closed');
+    const panel = this.container.querySelector('.techsurf-chat-panel');
+    const button = this.container.querySelector('.techsurf-chat-button');
     
-    if (this.config.onClose) {
-      this.config.onClose();
-    }
+    panel?.classList.remove('open');
+    button?.classList.remove('open');
+    
+    this.isOpen = false;
+    this.emit('closed');
   }
 
   public toggle(): void {
-    if (this.state.isOpen) {
+    if (this.isOpen) {
       this.close();
     } else {
       this.open();
     }
   }
 
-  public async sendMessage(message: string): Promise<void> {
-    if (!message.trim()) return;
-    
+  public async sendMessage(content: string): Promise<void> {
+    if (!content.trim()) return;
+
     const userMessage: ChatMessage = {
-      id: this.generateMessageId(),
       role: 'user',
-      content: message.trim(),
-      timestamp: new Date().toISOString(),
+      content: content.trim(),
+      timestamp: new Date(),
+      id: this.generateMessageId()
     };
-    
-    this.addMessage(userMessage);
-    this.state.currentInput = '';
-    this.state.isLoading = true;
-    
-    // Update UI
-    this.updateInput('');
+
     this.showTypingIndicator();
-    
-    try {
-      // Send to API
-      await this.sendToAPI(userMessage);
-      
-    } catch (error) {
-      console.error('❌ Failed to send message:', error);
-      
-      const errorMessage: ChatMessage = {
-        id: this.generateMessageId(),
-        role: 'assistant',
-        content: 'Sorry, I encountered an error. Please try again.',
-        timestamp: new Date().toISOString(),
-      };
-      
-      this.addMessage(errorMessage);
-      
-      if (this.config.onError) {
-        this.config.onError(error instanceof Error ? error : new Error('Send failed'));
-      }
-      
-    } finally {
-      this.state.isLoading = false;
-      this.hideTypingIndicator();
-    }
-  }
-
-  private async sendToAPI(message: ChatMessage): Promise<void> {
-    const websiteContext = this.gatherWebsiteContext();
-    
-    // Prepare messages for API
-    const messages = [...this.state.messages];
-    
-    const requestBody = {
-      messages: messages.map(m => ({
-        role: m.role,
-        content: m.content
-      })),
-      websiteContext,
-      provider: 'groq',
-      model: 'llama-3.3-70b-versatile'
-    };
-
-    // Setup abort controller for cancellation
-    this.abortController = new AbortController();
 
     try {
-      const response = await fetch(`${this.config.endpoint}/api/chat/stream`, {
+      // Prepare messages for API
+      const messagesToSend = [...this.messages, userMessage].map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }));
+
+      const response = await fetch(`${this.config.apiUrl}/api/chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': this.config.apiKey,
-          ...(this.config.contentstack && {
-            'x-contentstack-api-key': this.config.contentstack.apiKey,
-            'x-contentstack-delivery-token': this.config.contentstack.deliveryToken,
-          }),
+          'x-tenant-id': this.config.tenantId
         },
-        body: JSON.stringify(requestBody),
-        signal: this.abortController.signal,
+        body: JSON.stringify({
+          messages: messagesToSend,
+          websiteContext: this.config.websiteContext || {}
+        })
       });
 
       if (!response.ok) {
-        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+        throw new Error(`API error: ${response.status}`);
       }
 
       // Handle streaming response
       await this.handleStreamingResponse(response);
-      
+
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.log('📦 Request cancelled');
-        return;
-      }
-      throw error;
+      console.error('❌ Send message error:', error);
+      this.addMessageToUI({
+        role: 'assistant',
+        content: 'Sorry, I encountered an error while processing your message. Please try again.',
+        timestamp: new Date(),
+        id: this.generateMessageId()
+      });
+    } finally {
+      this.hideTypingIndicator();
     }
   }
 
   private async handleStreamingResponse(response: Response): Promise<void> {
     const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error('No response body');
-    }
+    if (!reader) return;
 
     const decoder = new TextDecoder();
-    let assistantMessage: ChatMessage | null = null;
-    let buffer = '';
+    let assistantMessage = '';
+    let messageId = this.generateMessageId();
+    let messageElement: HTMLElement | null = null;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        
         if (done) break;
-        
-        buffer += decoder.decode(value, { stream: true });
-        
-        // Process complete lines
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep the last incomplete line
-        
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
         for (const line of lines) {
           if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim();
-            
-            if (data === '[DONE]') {
-              return;
-            }
-            
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
             try {
-              const chunk: StreamChunk = JSON.parse(data);
+              const parsed = JSON.parse(data);
               
-              if (chunk.type === 'content' && chunk.content) {
-                // Create assistant message if it doesn't exist
-                if (!assistantMessage) {
-                  assistantMessage = {
-                    id: this.generateMessageId(),
-                    role: 'assistant',
-                    content: '',
-                    timestamp: new Date().toISOString(),
-                  };
-                  this.addMessage(assistantMessage);
-                }
+              if (parsed.type === 'content' && parsed.content) {
+                assistantMessage += parsed.content;
                 
-                // Append content
-                assistantMessage.content += chunk.content;
-                this.updateMessage(assistantMessage);
-              }
-              
-              if (chunk.type === 'completion') {
-                // Message complete
-                if (assistantMessage && this.config.onMessageReceived) {
-                  this.config.onMessageReceived({
-                    id: assistantMessage.id,
-                    content: assistantMessage.content,
-                    timestamp: assistantMessage.timestamp,
-                  });
+                // Create or update message element
+                if (!messageElement) {
+                  const message: ChatMessage = {
+                    role: 'assistant',
+                    content: assistantMessage,
+                    timestamp: new Date(),
+                    id: messageId
+                  };
+                  this.addMessageToUI(message);
+                  messageElement = this.container?.querySelector(`.techsurf-chat-message:last-child .techsurf-chat-message-content`) as HTMLElement;
+                } else {
+                  // Update existing message
+                  messageElement.innerHTML = this.formatMessageContent(assistantMessage);
+                  const messagesContainer = this.container?.querySelector('.techsurf-chat-messages');
+                  if (messagesContainer) {
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                  }
                 }
+              } else if (parsed.type === 'completion') {
+                // Message completed
+                break;
+              } else if (parsed.type === 'error') {
+                throw new Error(parsed.error);
               }
-              
-              if (chunk.type === 'error') {
-                throw new Error(chunk.error || 'Unknown streaming error');
-              }
-              
             } catch (parseError) {
-              console.warn('Failed to parse stream chunk:', data);
-              continue;
+              console.warn('Failed to parse stream data:', parseError);
             }
           }
         }
@@ -361,641 +797,71 @@ export class UniversalChatWidget implements IUniversalChatWidget {
     }
   }
 
-  private createWidgetElements(container: HTMLElement): void {
-    // Create container
-    const widgetContainer = document.createElement('div');
-    widgetContainer.className = 'techsurf-widget';
-    widgetContainer.setAttribute('data-version', '1.0.0');
-    
-    // Create trigger button
-    const trigger = document.createElement('button');
-    trigger.className = 'techsurf-trigger';
-    trigger.innerHTML = `
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-      </svg>
-    `;
-    
-    // Create chat window
-    const chatWindow = document.createElement('div');
-    chatWindow.className = 'techsurf-chat-window';
-    chatWindow.innerHTML = `
-      <div class="techsurf-header">
-        <div class="techsurf-header-content">
-          <div class="techsurf-brand">
-            ${this.config.branding?.logo ? `<img src="${this.config.branding.logo}" alt="Logo">` : ''}
-            <div>
-              <div class="techsurf-name">${this.config.branding?.name || 'AI Assistant'}</div>
-              <div class="techsurf-status">Online</div>
-            </div>
-          </div>
-          <button class="techsurf-close">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
-        </div>
-      </div>
-      
-      <div class="techsurf-messages">
-        <div class="techsurf-message assistant">
-          <div class="techsurf-message-content">
-            Hello! I'm your AI assistant. I can help you with questions about our products, services, or anything else. How can I help you today?
-          </div>
-        </div>
-      </div>
-      
-      <div class="techsurf-input-area">
-        <div class="techsurf-input-container">
-          <input type="text" placeholder="Type your message..." maxlength="1000">
-          <button class="techsurf-send">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="22" y1="2" x2="11" y2="13"></line>
-              <polygon points="22,2 15,22 11,13 2,9"></polygon>
-            </svg>
-          </button>
-        </div>
-        <div class="techsurf-footer">
-          Powered by <a href="https://techsurf.ai" target="_blank">TechSurf</a>
-        </div>
-      </div>
-    `;
-    
-    // Append elements
-    widgetContainer.appendChild(chatWindow);
-    widgetContainer.appendChild(trigger);
-    container.appendChild(widgetContainer);
-    
-    // Store references
-    this.elements = {
-      container: widgetContainer,
-      trigger,
-      chatWindow,
-      messageList: chatWindow.querySelector('.techsurf-messages') as HTMLElement,
-      inputArea: chatWindow.querySelector('.techsurf-input-area') as HTMLElement,
-      header: chatWindow.querySelector('.techsurf-header') as HTMLElement,
-      footer: chatWindow.querySelector('.techsurf-footer') as HTMLElement,
-    };
-  }
-
-  private setupEventListeners(): void {
-    // Trigger button
-    this.elements.trigger?.addEventListener('click', () => this.open());
-    
-    // Close button
-    this.elements.chatWindow?.querySelector('.techsurf-close')?.addEventListener('click', () => this.close());
-    
-    // Input handling
-    const input = this.elements.inputArea?.querySelector('input') as HTMLInputElement;
-    const sendButton = this.elements.inputArea?.querySelector('.techsurf-send') as HTMLButtonElement;
-    
-    if (input) {
-      input.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          this.sendMessage(input.value);
-        }
-      });
-      
-      input.addEventListener('input', (e) => {
-        this.state.currentInput = (e.target as HTMLInputElement).value;
-      });
-    }
-    
-    if (sendButton) {
-      sendButton.addEventListener('click', () => {
-        if (input) {
-          this.sendMessage(input.value);
-        }
-      });
-    }
-    
-    // Click outside to close (optional)
-    if (this.config.theme?.closeOnClickOutside) {
-      document.addEventListener('click', (e) => {
-        if (this.state.isOpen && 
-            !this.elements.container?.contains(e.target as Node)) {
-          this.close();
-        }
-      });
-    }
-  }
-
-  private removeEventListeners(): void {
-    // Event listeners are automatically removed when elements are removed from DOM
-  }
-
-  private applyStyles(): void {
-    // Create and inject CSS
-    const styleId = 'techsurf-widget-styles';
-    if (!document.getElementById(styleId)) {
-      const style = document.createElement('style');
-      style.id = styleId;
-      style.textContent = this.generateCSS();
-      document.head.appendChild(style);
-    }
-  }
-
-  private generateCSS(): string {
-    const theme = this.config.theme!;
-    const position = this.config.position!;
-    
-    // Position styles
-    const positionStyles = this.getPositionStyles(position);
-    
-    return `
-      .techsurf-widget {
-        position: fixed;
-        ${positionStyles}
-        z-index: 2147483647;
-        font-family: ${theme.fontFamily};
-        font-size: ${theme.fontSize};
-        color: ${theme.textColor};
-        line-height: 1.4;
-      }
-      
-      .techsurf-trigger {
-        width: 60px;
-        height: 60px;
-        border-radius: 50%;
-        background: ${theme.primaryColor};
-        color: white;
-        border: none;
-        cursor: pointer;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        transition: all 0.3s ease;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      
-      .techsurf-trigger:hover {
-        transform: scale(1.05);
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
-      }
-      
-      .techsurf-trigger.hidden {
-        display: none;
-      }
-      
-      .techsurf-chat-window {
-        width: 380px;
-        height: 600px;
-        background: ${theme.backgroundColor};
-        border-radius: ${theme.borderRadius}px;
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-        display: none;
-        flex-direction: column;
-        overflow: hidden;
-        margin-bottom: 20px;
-      }
-      
-      .techsurf-chat-window.open {
-        display: flex;
-        animation: slideUp 0.3s ease-out;
-      }
-      
-      @keyframes slideUp {
-        from {
-          opacity: 0;
-          transform: translateY(20px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-      
-      .techsurf-header {
-        background: ${theme.primaryColor};
-        color: white;
-        padding: 16px;
-        flex-shrink: 0;
-      }
-      
-      .techsurf-header-content {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      
-      .techsurf-brand {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-      
-      .techsurf-brand img {
-        width: 32px;
-        height: 32px;
-        border-radius: 50%;
-      }
-      
-      .techsurf-name {
-        font-weight: 600;
-        font-size: 16px;
-      }
-      
-      .techsurf-status {
-        font-size: 12px;
-        opacity: 0.8;
-      }
-      
-      .techsurf-close {
-        background: none;
-        border: none;
-        color: white;
-        cursor: pointer;
-        opacity: 0.8;
-        transition: opacity 0.2s ease;
-        padding: 4px;
-      }
-      
-      .techsurf-close:hover {
-        opacity: 1;
-      }
-      
-      .techsurf-messages {
-        flex: 1;
-        overflow-y: auto;
-        padding: 16px;
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-      }
-      
-      .techsurf-message {
-        display: flex;
-        max-width: 80%;
-      }
-      
-      .techsurf-message.user {
-        align-self: flex-end;
-      }
-      
-      .techsurf-message.assistant {
-        align-self: flex-start;
-      }
-      
-      .techsurf-message-content {
-        background: #f1f3f5;
-        padding: 12px 16px;
-        border-radius: 18px;
-        word-wrap: break-word;
-        white-space: pre-wrap;
-      }
-      
-      .techsurf-message.user .techsurf-message-content {
-        background: ${theme.primaryColor};
-        color: white;
-      }
-      
-      .techsurf-typing-indicator {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 12px 16px;
-        background: #f1f3f5;
-        border-radius: 18px;
-        align-self: flex-start;
-        max-width: 80px;
-      }
-      
-      .techsurf-typing-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: #999;
-        animation: typingDot 1.4s infinite ease-in-out;
-      }
-      
-      .techsurf-typing-dot:nth-child(1) { animation-delay: -0.32s; }
-      .techsurf-typing-dot:nth-child(2) { animation-delay: -0.16s; }
-      
-      @keyframes typingDot {
-        0%, 80%, 100% {
-          opacity: 0.3;
-          transform: scale(0.8);
-        }
-        40% {
-          opacity: 1;
-          transform: scale(1);
-        }
-      }
-      
-      .techsurf-input-area {
-        flex-shrink: 0;
-        border-top: 1px solid #e9ecef;
-        background: ${theme.backgroundColor};
-      }
-      
-      .techsurf-input-container {
-        display: flex;
-        padding: 16px;
-        gap: 12px;
-        align-items: flex-end;
-      }
-      
-      .techsurf-input-container input {
-        flex: 1;
-        border: 1px solid #e9ecef;
-        border-radius: 20px;
-        padding: 12px 16px;
-        font-size: 14px;
-        font-family: inherit;
-        outline: none;
-        resize: none;
-        background: white;
-      }
-      
-      .techsurf-input-container input:focus {
-        border-color: ${theme.primaryColor};
-      }
-      
-      .techsurf-send {
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        background: ${theme.primaryColor};
-        color: white;
-        border: none;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: all 0.2s ease;
-        flex-shrink: 0;
-      }
-      
-      .techsurf-send:hover {
-        background: ${this.darkenColor(theme.primaryColor!, 10)};
-      }
-      
-      .techsurf-send:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-      }
-      
-      .techsurf-footer {
-        text-align: center;
-        padding: 8px 16px 16px;
-        font-size: 12px;
-        color: #999;
-      }
-      
-      .techsurf-footer a {
-        color: ${theme.primaryColor};
-        text-decoration: none;
-      }
-      
-      @media (max-width: 480px) {
-        .techsurf-chat-window {
-          width: 100vw;
-          height: 100vh;
-          border-radius: 0;
-          margin: 0;
-        }
-        
-        .techsurf-widget {
-          ${position.includes('right') ? 'right: 0;' : 'left: 0;'}
-          ${position.includes('bottom') ? 'bottom: 0;' : 'top: 0;'}
-        }
-      }
-    `;
-  }
-
-  private getPositionStyles(position: string): string {
-    const margin = '20px';
-    
-    switch (position) {
-      case 'bottom-right':
-        return `bottom: ${margin}; right: ${margin};`;
-      case 'bottom-left':
-        return `bottom: ${margin}; left: ${margin};`;
-      case 'top-right':
-        return `top: ${margin}; right: ${margin};`;
-      case 'top-left':
-        return `top: ${margin}; left: ${margin};`;
-      case 'center':
-        return `top: 50%; left: 50%; transform: translate(-50%, -50%);`;
-      default:
-        return `bottom: ${margin}; right: ${margin};`;
-    }
-  }
-
-  private darkenColor(color: string, percent: number): string {
-    // Simple color darkening utility
-    const num = parseInt(color.replace("#", ""), 16);
-    const amt = Math.round(2.55 * percent);
-    const R = (num >> 16) - amt;
-    const G = (num >> 8 & 0x00FF) - amt;
-    const B = (num & 0x0000FF) - amt;
-    return "#" + (0x1000000 + (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
-      (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
-      (B < 255 ? B < 1 ? 0 : B : 255)).toString(16).slice(1);
-  }
-
-  // Additional methods for message management, context gathering, etc...
-  
-  private addMessage(message: ChatMessage): void {
-    this.state.messages.push(message);
-    this.renderMessage(message);
-    
-    if (this.config.onMessageSent && message.role === 'user') {
-      this.config.onMessageSent(message);
-    }
-  }
-
-  private updateMessage(message: ChatMessage): void {
-    const messageElement = this.elements.messageList?.querySelector(`[data-message-id="${message.id}"]`);
-    if (messageElement) {
-      const contentElement = messageElement.querySelector('.techsurf-message-content');
-      if (contentElement) {
-        contentElement.textContent = message.content;
-      }
-    }
-  }
-
-  private renderMessage(message: ChatMessage): void {
-    if (!this.elements.messageList) return;
-    
-    const messageElement = document.createElement('div');
-    messageElement.className = `techsurf-message ${message.role}`;
-    messageElement.setAttribute('data-message-id', message.id);
-    messageElement.innerHTML = `
-      <div class="techsurf-message-content">${message.content}</div>
-    `;
-    
-    this.elements.messageList.appendChild(messageElement);
-    this.scrollToBottom();
-  }
-
-  private showTypingIndicator(): void {
-    if (!this.elements.messageList) return;
-    
-    const indicator = document.createElement('div');
-    indicator.className = 'techsurf-typing-indicator';
-    indicator.innerHTML = `
-      <div class="techsurf-typing-dot"></div>
-      <div class="techsurf-typing-dot"></div>
-      <div class="techsurf-typing-dot"></div>
-    `;
-    
-    this.elements.messageList.appendChild(indicator);
-    this.scrollToBottom();
-  }
-
-  private hideTypingIndicator(): void {
-    const indicator = this.elements.messageList?.querySelector('.techsurf-typing-indicator');
-    if (indicator) {
-      indicator.remove();
-    }
-  }
-
-  private scrollToBottom(): void {
-    if (this.elements.messageList) {
-      this.elements.messageList.scrollTop = this.elements.messageList.scrollHeight;
-    }
-  }
-
-  private updateInput(value: string): void {
-    const input = this.elements.inputArea?.querySelector('input') as HTMLInputElement;
-    if (input) {
-      input.value = value;
-    }
-  }
-
-  private generateSessionId(): string {
-    return 'sess_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-  }
-
-  private generateMessageId(): string {
-    return 'msg_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-  }
-
-  private autoDetectContentstack() {
-    // Try to auto-detect Contentstack configuration from meta tags
-    const apiKey = document.querySelector('meta[name="contentstack-api-key"]')?.getAttribute('content');
-    const deliveryToken = document.querySelector('meta[name="contentstack-delivery-token"]')?.getAttribute('content');
-    const environment = document.querySelector('meta[name="contentstack-environment"]')?.getAttribute('content');
-    const region = document.querySelector('meta[name="contentstack-region"]')?.getAttribute('content');
-    
-    if (apiKey && deliveryToken) {
-      console.log('✅ Auto-detected Contentstack configuration');
-      return {
-        apiKey,
-        deliveryToken,
-        environment: environment || 'production',
-        region: region || 'us'
-      };
-    }
-    
-    return undefined;
-  }
-
-  private gatherWebsiteContext() {
-    return {
-      domain: window.location.hostname,
-      url: window.location.href,
-      title: document.title,
-      userAgent: navigator.userAgent,
-      language: navigator.language,
-      referrer: document.referrer,
-      timestamp: new Date().toISOString(),
-      sessionId: this.sessionId,
-    };
-  }
-
-  private async initializeConnection(): Promise<void> {
-    // Test connection to API
-    try {
-      const response = await fetch(`${this.config.endpoint}/health`, {
-        method: 'GET',
-        headers: {
-          'x-api-key': this.config.apiKey,
-        },
-      });
-      
-      if (response.ok) {
-        console.log('✅ Connection to TechSurf API established');
-        this.state.isConnected = true;
-      } else {
-        throw new Error('API health check failed');
-      }
-    } catch (error) {
-      console.warn('⚠️ Could not connect to TechSurf API:', error);
-      this.state.isConnected = false;
-    }
-  }
-
-  private trackEvent(eventType: string, eventData?: any): void {
-    if (!this.config.enableAnalytics) return;
-    
-    const event = {
-      type: eventType,
-      data: eventData,
-      timestamp: new Date().toISOString(),
-      sessionId: this.sessionId,
-      url: window.location.href,
-    };
-    
-    // Send to analytics endpoint (fire and forget)
-    fetch(`${this.config.endpoint}/api/analytics/track`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-      },
-      body: JSON.stringify(event),
-    }).catch(() => {}); // Ignore errors
-  }
-
-  // Public API methods
-  public updateConfig(newConfig: Partial<WidgetConfig>): void {
-    this.config = { ...this.config, ...newConfig };
-    
-    if (this.isInitialized) {
-      // Reapply styles if theme changed
-      if (newConfig.theme) {
-        this.applyStyles();
-      }
-    }
-  }
-
-  public getMessages(): ChatMessage[] {
-    return [...this.state.messages];
-  }
-
-  public clearMessages(): void {
-    this.state.messages = [];
-    if (this.elements.messageList) {
-      this.elements.messageList.innerHTML = '';
-    }
-  }
-
   public destroy(): void {
-    this.unmount();
+    if (this.container) {
+      this.container.remove();
+      this.container = null;
+    }
     
-    // Remove styles
-    const styleElement = document.getElementById('techsurf-widget-styles');
-    if (styleElement) {
-      styleElement.remove();
+    const styles = document.getElementById('techsurf-chat-styles');
+    if (styles) {
+      styles.remove();
+    }
+    
+    this.eventListeners = {};
+    this.isInitialized = false;
+    this.emit('destroyed');
+  }
+
+  public on(event: string, callback: Function): void {
+    if (!this.eventListeners[event]) {
+      this.eventListeners[event] = [];
+    }
+    this.eventListeners[event].push(callback);
+  }
+
+  public off(event: string, callback?: Function): void {
+    if (!this.eventListeners[event]) return;
+    
+    if (callback) {
+      this.eventListeners[event] = this.eventListeners[event].filter(cb => cb !== callback);
+    } else {
+      delete this.eventListeners[event];
     }
   }
-}
 
-// Export for browser usage
-if (typeof window !== 'undefined') {
-  (window as any).TechSurfChat = {
-    UniversalChatWidget,
-    init: (config: WidgetConfig) => {
-      const widget = new UniversalChatWidget(config);
-      widget.mount('body');
-      return widget;
-    },
-    version: '1.0.0'
-  };
+  private emit(event: string, data?: any): void {
+    if (this.eventListeners[event]) {
+      this.eventListeners[event].forEach(callback => {
+        try {
+          callback(data);
+        } catch (error) {
+          console.error(`Error in event callback for ${event}:`, error);
+        }
+      });
+    }
+  }
+
+  // Getters
+  public getMessages(): ChatMessage[] {
+    return [...this.messages];
+  }
+
+  public getConfig(): ChatWidgetConfig {
+    return { ...this.config };
+  }
+
+  public getSessionId(): string {
+    return this.sessionId;
+  }
+
+  public isWidgetOpen(): boolean {
+    return this.isOpen;
+  }
+
+  public isWidgetInitialized(): boolean {
+    return this.isInitialized;
+  }
 }
 
 export default UniversalChatWidget;
